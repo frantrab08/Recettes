@@ -24,28 +24,58 @@ def get_db():
 
 db = get_db()
 
+def get_credentials():
+    try:
+        return st.secrets["LOGIN_USER"], st.secrets["LOGIN_PASSWORD"]
+    except Exception:
+        from dotenv import load_dotenv
+        load_dotenv()
+        return os.getenv("LOGIN_USER", "pb"), os.getenv("LOGIN_PASSWORD", "pb_recettes!")
+
 # ─── Session state ───────────────────────────────────────────────────
-for k, v in {"page": "home", "recipe": None, "confirm_del": False, "n_ings": 1}.items():
+for k, v in {"logged_in": False, "page": "home", "recipe": None, "confirm_del": False, "n_ings": 1}.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 # ─── DB helpers ──────────────────────────────────────────────────────
-def get_recipes():
-    return db.table("recipes").select("*").order("name").execute().data
+def get_recipes(search="", category_id=None):
+    q = db.table("recipes").select("*, categories(name)").order("name")
+    if category_id:
+        q = q.eq("category_id", category_id)
+    results = q.execute().data
+    if search:
+        s = search.lower()
+        results = [r for r in results if s in r["name"].lower()]
+    return results
 
 def get_ingredients(recipe_id):
     return db.table("ingredients").select("*").eq("recipe_id", recipe_id).order("name").execute().data
 
-def create_recipe(name, desc, ings):
-    r = db.table("recipes").insert({"name": name, "description": desc}).execute().data[0]
+def get_categories():
+    return db.table("categories").select("*").order("name").execute().data
+
+def create_category(name):
+    return db.table("categories").insert({"name": name}).execute().data[0]
+
+def delete_category(cid):
+    db.table("categories").delete().eq("id", cid).execute()
+
+def create_recipe(name, desc, category_id, prep_time, cook_time, temperature, ings):
+    r = db.table("recipes").insert({
+        "name": name, "description": desc, "category_id": category_id,
+        "prep_time": prep_time, "cook_time": cook_time, "temperature": temperature
+    }).execute().data[0]
     if ings:
         db.table("ingredients").insert(
             [{"recipe_id": r["id"], "name": i["name"], "base_quantity": i["qty"]} for i in ings]
         ).execute()
     return r
 
-def update_recipe(rid, name, desc, ings):
-    db.table("recipes").update({"name": name, "description": desc}).eq("id", rid).execute()
+def update_recipe(rid, name, desc, category_id, prep_time, cook_time, temperature, ings):
+    db.table("recipes").update({
+        "name": name, "description": desc, "category_id": category_id,
+        "prep_time": prep_time, "cook_time": cook_time, "temperature": temperature
+    }).eq("id", rid).execute()
     db.table("ingredients").delete().eq("recipe_id", rid).execute()
     if ings:
         db.table("ingredients").insert(
@@ -61,43 +91,132 @@ def nav(page, recipe=None):
     st.session_state.recipe = recipe
     st.session_state.confirm_del = False
     if page == "edit" and recipe:
-        ings = get_ingredients(recipe["id"])
-        st.session_state.n_ings = max(len(ings), 1)
+        st.session_state.n_ings = max(len(get_ingredients(recipe["id"])), 1)
     elif page == "add":
         st.session_state.n_ings = 1
     st.rerun()
 
 # ════════════════════════════════════════════════════════════════════
+# PAGE : LOGIN
+# ════════════════════════════════════════════════════════════════════
+def page_login():
+    _, col, _ = st.columns([1, 2, 1])
+    with col:
+        st.title("🍰 Recettes Pâtissier")
+        st.divider()
+        with st.form("login"):
+            user = st.text_input("Utilisateur")
+            pwd = st.text_input("Mot de passe", type="password")
+            if st.form_submit_button("Se connecter", type="primary", use_container_width=True):
+                valid_user, valid_pass = get_credentials()
+                if user == valid_user and pwd == valid_pass:
+                    st.session_state.logged_in = True
+                    st.rerun()
+                else:
+                    st.error("Identifiants incorrects.")
+
+# ════════════════════════════════════════════════════════════════════
 # PAGE : ACCUEIL
 # ════════════════════════════════════════════════════════════════════
 def page_home():
-    c1, c2 = st.columns([4, 1])
+    c1, c2, c3 = st.columns([3, 1, 1])
     with c1:
         st.title("🍰 Mes Recettes")
     with c2:
-        st.write("")
         if st.button("➕ Nouvelle recette", type="primary", use_container_width=True):
             nav("add")
+    with c3:
+        if st.button("⚙️ Catégories", use_container_width=True):
+            nav("categories")
 
-    recipes = get_recipes()
+    # Recherche + filtre catégorie
+    col_search, col_cat = st.columns([3, 2])
+    with col_search:
+        search = st.text_input("🔍 Rechercher", placeholder="Nom de recette ou ingrédient...")
+    with col_cat:
+        categories = get_categories()
+        cat_options = {"Toutes": None} | {c["name"]: c["id"] for c in categories}
+        selected_cat_name = st.selectbox("Catégorie", list(cat_options.keys()))
+        selected_cat_id = cat_options[selected_cat_name]
+
+    recipes = get_recipes(search, selected_cat_id)
+
+    # Si pas trouvé par nom, cherche par ingrédient
+    if search and not recipes:
+        all_recipes = get_recipes()
+        recipes = [r for r in all_recipes if any(
+            search.lower() in i["name"].lower() for i in get_ingredients(r["id"])
+        )]
+        if recipes:
+            st.caption(f"Résultats par ingrédient pour « {search} »")
+
     if not recipes:
-        st.info("Aucune recette pour l'instant. Clique sur **➕ Nouvelle recette** pour commencer !")
+        st.info("Aucune recette trouvée." if search else "Aucune recette. Clique sur **➕ Nouvelle recette** !")
         return
 
+    st.caption(f"{len(recipes)} recette(s)")
     cols = st.columns(min(len(recipes), 3))
     for i, r in enumerate(recipes):
         ings = get_ingredients(r["id"])
         total = sum(x["base_quantity"] for x in ings)
+        cat = r.get("categories") or {}
         with cols[i % 3]:
             with st.container(border=True):
                 st.subheader(r["name"])
+                if cat.get("name"):
+                    st.caption(f"🏷️ {cat['name']}")
                 if r.get("description"):
                     st.caption(r["description"])
+                parts = []
+                if r.get("prep_time"):
+                    parts.append(f"⏱️ {r['prep_time']} min")
+                if r.get("cook_time"):
+                    parts.append(f"🔥 {r['cook_time']} min")
+                if r.get("temperature"):
+                    parts.append(f"🌡️ {r['temperature']}°C")
+                if parts:
+                    st.caption("  •  ".join(parts))
                 m1, m2 = st.columns(2)
                 m1.metric("Poids total", f"{total:.0f} g")
                 m2.metric("Ingrédients", len(ings))
                 if st.button("Voir →", key=f"see_{r['id']}", use_container_width=True):
                     nav("view", r)
+
+# ════════════════════════════════════════════════════════════════════
+# PAGE : CATÉGORIES
+# ════════════════════════════════════════════════════════════════════
+def page_categories():
+    c1, c2 = st.columns([4, 1])
+    with c1:
+        st.title("⚙️ Gérer les catégories")
+    with c2:
+        if st.button("← Retour", use_container_width=True):
+            nav("home")
+
+    with st.form("new_cat"):
+        col_in, col_btn = st.columns([3, 1])
+        with col_in:
+            new_cat = st.text_input("Nouvelle catégorie", placeholder="ex: Viennoiseries")
+        with col_btn:
+            st.write("")
+            if st.form_submit_button("➕ Ajouter", type="primary", use_container_width=True):
+                if new_cat.strip():
+                    create_category(new_cat.strip())
+                    st.rerun()
+
+    st.divider()
+    categories = get_categories()
+    if not categories:
+        st.info("Aucune catégorie pour l'instant.")
+        return
+
+    for cat in categories:
+        c1, c2 = st.columns([4, 1])
+        c1.write(f"🏷️ {cat['name']}")
+        with c2:
+            if st.button("🗑️", key=f"del_{cat['id']}", use_container_width=True):
+                delete_category(cat["id"])
+                st.rerun()
 
 # ════════════════════════════════════════════════════════════════════
 # PAGE : VISUALISATION RECETTE
@@ -108,13 +227,12 @@ def page_view():
         nav("home")
         return
 
-    data = db.table("recipes").select("*").eq("id", recipe["id"]).execute().data
+    data = db.table("recipes").select("*, categories(name)").eq("id", recipe["id"]).execute().data
     if not data:
         nav("home")
         return
     recipe = data[0]
 
-    # ── Header ───────────────────────────────────────────────────────
     c1, c2, c3 = st.columns([4, 1, 1])
     with c1:
         st.title(f"🍰 {recipe['name']}")
@@ -125,6 +243,19 @@ def page_view():
         if st.button("← Accueil", use_container_width=True):
             nav("home")
 
+    # Infos meta
+    cat = recipe.get("categories") or {}
+    parts = []
+    if cat.get("name"):
+        parts.append(f"🏷️ {cat['name']}")
+    if recipe.get("prep_time"):
+        parts.append(f"⏱️ Préparation : **{recipe['prep_time']} min**")
+    if recipe.get("cook_time"):
+        parts.append(f"🔥 Cuisson : **{recipe['cook_time']} min**")
+    if recipe.get("temperature"):
+        parts.append(f"🌡️ **{recipe['temperature']}°C**")
+    if parts:
+        st.markdown("  •  ".join(parts))
     if recipe.get("description"):
         st.markdown(f"*{recipe['description']}*")
 
@@ -134,57 +265,38 @@ def page_view():
         return
 
     base_total = sum(i["base_quantity"] for i in ingredients)
-
     st.divider()
 
-    # ── Ajustement ───────────────────────────────────────────────────
-    st.subheader("⚖️ Ajuster la recette")
-
-    mode = st.radio(
-        "Comment veux-tu ajuster ?",
-        ["Par poids total", "Par ingrédient"],
-        horizontal=True
-    )
-
+    # Ajustement
+    st.subheader("⚖️ Ajuster les quantités")
+    mode = st.radio("Mode", ["Par poids total", "Par ingrédient"], horizontal=True)
     scale_factor = 1.0
 
     if mode == "Par poids total":
         col_input, col_info = st.columns([2, 2])
         with col_input:
-            new_total = st.number_input(
-                "Poids total souhaité (g)",
-                min_value=0.1,
-                value=float(base_total),
-                step=10.0
-            )
+            new_total = st.number_input("Poids total souhaité (g)", min_value=0.1, value=float(base_total), step=10.0)
             scale_factor = new_total / base_total
         with col_info:
             st.markdown("#### Résultat")
             if abs(scale_factor - 1.0) < 0.001:
-                st.info(f"Quantités de base → **{base_total:.0f} g** au total")
+                st.info(f"Recette de base : **{base_total:.0f} g**")
             else:
                 st.success(f"**{base_total:.0f} g** → **{new_total:.0f} g**  \nMultiplicateur : ×{scale_factor:.3f}")
-
-    else:  # Par ingrédient
+    else:
         col_sel, col_input, col_info = st.columns([2, 2, 2])
         with col_sel:
-            names = [i["name"] for i in ingredients]
-            sel = st.selectbox("Ingrédient de référence", names)
+            sel = st.selectbox("Ingrédient de référence", [i["name"] for i in ingredients])
             ref = next((i for i in ingredients if i["name"] == sel), None)
         with col_input:
             if ref:
-                new_qty = st.number_input(
-                    f"Nouvelle quantité (g)",
-                    min_value=0.1,
-                    value=float(ref["base_quantity"]),
-                    step=1.0
-                )
+                new_qty = st.number_input("Nouvelle quantité (g)", min_value=0.1, value=float(ref["base_quantity"]), step=1.0)
                 scale_factor = new_qty / ref["base_quantity"]
         with col_info:
             if ref:
                 st.markdown("#### Résultat")
                 if abs(scale_factor - 1.0) < 0.001:
-                    st.info(f"Quantités de base → **{base_total:.0f} g** au total")
+                    st.info(f"Recette de base : **{base_total:.0f} g**")
                 else:
                     st.success(
                         f"**{ref['name']}** : {ref['base_quantity']:.0f} g → **{new_qty:.0f} g**  \n"
@@ -194,55 +306,36 @@ def page_view():
 
     st.divider()
 
-    # ── Tableau des ingrédients ───────────────────────────────────────
+    # Tableau ingrédients
     st.subheader("📋 Ingrédients")
-
     adjusted_total = base_total * scale_factor
     is_scaled = abs(scale_factor - 1.0) > 0.001
 
-    # En-tête du tableau
     h1, h2, h3, h4 = st.columns([3, 2, 2, 1])
     h1.markdown("**Ingrédient**")
     h2.markdown(f"**Base ({base_total:.0f} g)**")
-    if is_scaled:
-        h3.markdown(f"**Ajusté ({adjusted_total:.0f} g)**")
-    else:
-        h3.markdown("**Quantité**")
+    h3.markdown(f"**Ajusté ({adjusted_total:.0f} g)**" if is_scaled else "**Quantité**")
     h4.markdown("**%**")
-
     st.divider()
 
     for ing in ingredients:
         c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
         adjusted = ing["base_quantity"] * scale_factor
         pct = ing["base_quantity"] / base_total * 100
-
         c1.write(ing["name"])
         c2.write(f"{ing['base_quantity']:.1f} g")
-
-        if is_scaled:
-            # Couleur verte si augmentation, rouge si diminution
-            delta = adjusted - ing["base_quantity"]
-            c3.markdown(f"**{adjusted:.1f} g**")
-        else:
-            c3.write(f"{adjusted:.1f} g")
-
+        c3.markdown(f"**{adjusted:.1f} g**" if is_scaled else f"{adjusted:.1f} g")
         c4.write(f"{pct:.1f}%")
 
-    # ── Ligne total ───────────────────────────────────────────────────
     st.divider()
     c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
     c1.markdown("**TOTAL**")
     c2.markdown(f"**{base_total:.0f} g**")
-    if is_scaled:
-        c3.markdown(f"**{adjusted_total:.0f} g**")
-    else:
-        c3.markdown(f"**{base_total:.0f} g**")
+    c3.markdown(f"**{adjusted_total:.0f} g**")
     c4.markdown("**100%**")
 
-    # ── Répartition visuelle ──────────────────────────────────────────
     st.divider()
-    st.subheader("📊 Répartition des ingrédients")
+    st.subheader("📊 Répartition")
     for ing in ingredients:
         pct = ing["base_quantity"] / base_total * 100
         col_name, col_bar = st.columns([2, 5])
@@ -257,16 +350,33 @@ def page_form():
     recipe = st.session_state.recipe
 
     st.title("✏️ Modifier la recette" if is_edit else "➕ Nouvelle recette")
-
     if st.button("← Retour"):
         nav("view", recipe) if is_edit else nav("home")
         return
 
     existing = get_ingredients(recipe["id"]) if is_edit else []
+    categories = get_categories()
 
     st.subheader("Informations")
     name = st.text_input("Nom de la recette *", value=recipe["name"] if is_edit else "", placeholder="ex: Tarte aux pommes")
-    desc = st.text_area("Description", value=recipe.get("description", "") if is_edit else "", placeholder="Notes, occasion, conseils...")
+    desc = st.text_area("Description", value=recipe.get("description", "") if is_edit else "", placeholder="Notes, conseils...")
+
+    cat_options = {"(Aucune)": None} | {c["name"]: c["id"] for c in categories}
+    current_cat = None
+    if is_edit and recipe.get("category_id"):
+        current_cat = next((c["name"] for c in categories if c["id"] == recipe["category_id"]), None)
+    cat_index = list(cat_options.keys()).index(current_cat) if current_cat in cat_options else 0
+    selected_cat = st.selectbox("Catégorie", list(cat_options.keys()), index=cat_index)
+    category_id = cat_options[selected_cat]
+
+    st.subheader("Temps & Température")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        prep_time = st.number_input("⏱️ Préparation (min)", min_value=0, value=recipe.get("prep_time") or 0, step=5)
+    with col2:
+        cook_time = st.number_input("🔥 Cuisson (min)", min_value=0, value=recipe.get("cook_time") or 0, step=5)
+    with col3:
+        temperature = st.number_input("🌡️ Température (°C)", min_value=0, value=recipe.get("temperature") or 0, step=10)
 
     st.divider()
     st.subheader(f"Ingrédients ({st.session_state.n_ings})")
@@ -286,42 +396,32 @@ def page_form():
         ex = existing[i] if i < len(existing) else None
         c1, c2 = st.columns([3, 1])
         with c1:
-            n = st.text_input(
-                f"Ingrédient {i + 1}",
-                value=ex["name"] if ex else "",
-                key=f"in_{i}",
-                placeholder="ex: Farine"
-            )
+            n = st.text_input(f"Ingrédient {i + 1}", value=ex["name"] if ex else "", key=f"in_{i}", placeholder="ex: Farine")
         with c2:
-            q = st.number_input(
-                "Quantité (g)",
-                min_value=0.0,
-                value=float(ex["base_quantity"]) if ex else 0.0,
-                step=1.0,
-                key=f"iq_{i}"
-            )
+            q = st.number_input("Quantité (g)", min_value=0.0, value=float(ex["base_quantity"]) if ex else 0.0, step=1.0, key=f"iq_{i}")
         ingredients.append({"name": n.strip(), "qty": q})
 
     valid = [i for i in ingredients if i["name"]]
     if valid:
-        total = sum(i["qty"] for i in valid)
-        st.info(f"Poids total : **{total:.0f} g** pour {len(valid)} ingrédient(s)")
+        st.info(f"Poids total : **{sum(i['qty'] for i in valid):.0f} g** pour {len(valid)} ingrédient(s)")
 
     st.divider()
-
     c_save, c_del = st.columns([3, 1])
     with c_save:
         if st.button("💾 Sauvegarder", type="primary", use_container_width=True):
             if not name.strip():
-                st.error("Le nom de la recette est obligatoire.")
+                st.error("Le nom est obligatoire.")
             elif not valid:
                 st.error("Ajoute au moins un ingrédient.")
             else:
+                prep = prep_time if prep_time > 0 else None
+                cook = cook_time if cook_time > 0 else None
+                temp = temperature if temperature > 0 else None
                 if is_edit:
-                    update_recipe(recipe["id"], name.strip(), desc, valid)
+                    update_recipe(recipe["id"], name.strip(), desc, category_id, prep, cook, temp, valid)
                     nav("view", {**recipe, "name": name.strip(), "description": desc})
                 else:
-                    new_r = create_recipe(name.strip(), desc, valid)
+                    new_r = create_recipe(name.strip(), desc, category_id, prep, cook, temp, valid)
                     nav("view", new_r)
 
     if is_edit:
@@ -332,7 +432,7 @@ def page_form():
                     st.rerun()
             else:
                 st.warning("Confirmer ?")
-                if st.button("✅ Oui, supprimer", use_container_width=True):
+                if st.button("✅ Oui", use_container_width=True):
                     delete_recipe(recipe["id"])
                     nav("home")
                 if st.button("❌ Annuler", use_container_width=True):
@@ -340,9 +440,13 @@ def page_form():
                     st.rerun()
 
 # ─── Routeur ─────────────────────────────────────────────────────────
-{
-    "home": page_home,
-    "view": page_view,
-    "add":  page_form,
-    "edit": page_form,
-}.get(st.session_state.page, page_home)()
+if not st.session_state.logged_in:
+    page_login()
+else:
+    {
+        "home":       page_home,
+        "view":       page_view,
+        "add":        page_form,
+        "edit":       page_form,
+        "categories": page_categories,
+    }.get(st.session_state.page, page_home)()
