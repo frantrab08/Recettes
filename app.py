@@ -372,11 +372,11 @@ def page_form():
     st.subheader("Temps & Température")
     col1, col2, col3 = st.columns(3)
     with col1:
-        prep_time = st.number_input("⏱️ Préparation (min)", min_value=0, value=recipe.get("prep_time") or 0, step=5)
+        prep_time = st.number_input("⏱️ Préparation (min)", min_value=0, value=int(recipe.get("prep_time") or 0) if is_edit else 0, step=5)
     with col2:
-        cook_time = st.number_input("🔥 Cuisson (min)", min_value=0, value=recipe.get("cook_time") or 0, step=5)
+        cook_time = st.number_input("🔥 Cuisson (min)", min_value=0, value=int(recipe.get("cook_time") or 0) if is_edit else 0, step=5)
     with col3:
-        temperature = st.number_input("🌡️ Température (°C)", min_value=0, value=recipe.get("temperature") or 0, step=10)
+        temperature = st.number_input("🌡️ Température (°C)", min_value=0, value=int(recipe.get("temperature") or 0) if is_edit else 0, step=10)
 
     st.divider()
     st.subheader(f"Ingrédients ({st.session_state.n_ings})")
