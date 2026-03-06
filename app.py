@@ -1,6 +1,15 @@
 import streamlit as st
 from supabase import create_client
 import os
+import io
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib import colors
+
+# ─── Version ────────────────────────────────────────────────────────
+LAST_UPDATE = "06/03/2026"
 
 # ─── Config ─────────────────────────────────────────────────────────
 st.set_page_config(
@@ -437,6 +446,19 @@ def page_view():
             with st.container(border=True):
                 st.markdown(f"**Étape {step['step_number']}** — {step['description']}")
 
+    # Bouton PDF
+    st.divider()
+    cat = recipe.get("categories") or {}
+    r_tags_pdf = get_recipe_tags(recipe["id"])
+    pdf_buffer = generate_pdf(recipe, ingredients, steps, r_tags_pdf, cat.get("name", ""), scale_factor)
+    st.download_button(
+        label="📄 Télécharger en PDF",
+        data=pdf_buffer,
+        file_name=f"{recipe['name'].replace(' ', '_')}.pdf",
+        mime="application/pdf",
+        use_container_width=True
+    )
+
 # ════════════════════════════════════════════════════════════════════
 # PAGE : FORMULAIRE AJOUT / MODIFICATION
 # ════════════════════════════════════════════════════════════════════
@@ -574,6 +596,106 @@ def page_form():
                     st.session_state.confirm_del = False
                     st.rerun()
 
+# ════════════════════════════════════════════════════════════════════
+# GÉNÉRATION PDF
+# ════════════════════════════════════════════════════════════════════
+def generate_pdf(recipe, ingredients, steps, tags, cat_name, scale_factor=1.0):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4,
+                            rightMargin=2*cm, leftMargin=2*cm,
+                            topMargin=2*cm, bottomMargin=2*cm)
+    styles = getSampleStyleSheet()
+    orange = colors.HexColor('#d4845a')
+    light  = colors.HexColor('#f5f0eb')
+
+    title_style = ParagraphStyle('RecipeTitle', parent=styles['Title'],
+                                 fontSize=22, textColor=orange, spaceAfter=6)
+    h2_style    = ParagraphStyle('H2', parent=styles['Heading2'],
+                                 fontSize=13, textColor=orange, spaceBefore=12, spaceAfter=4)
+    meta_style  = ParagraphStyle('Meta', parent=styles['Normal'],
+                                 fontSize=9, textColor=colors.grey)
+    step_style  = ParagraphStyle('Step', parent=styles['Normal'], fontSize=10, spaceAfter=4)
+
+    story = []
+
+    # Titre
+    story.append(Paragraph(recipe['name'], title_style))
+
+    # Meta (catégorie, temps, température)
+    meta_parts = []
+    if cat_name:
+        meta_parts.append(f"Categorie : {cat_name}")
+    if recipe.get('prep_time'):
+        meta_parts.append(f"Preparation : {recipe['prep_time']} min")
+    if recipe.get('cook_time'):
+        meta_parts.append(f"Cuisson : {recipe['cook_time']} min")
+    if recipe.get('temperature'):
+        meta_parts.append(f"Temperature : {recipe['temperature']} C")
+    if meta_parts:
+        story.append(Paragraph("  |  ".join(meta_parts), meta_style))
+
+    if tags:
+        story.append(Paragraph("Tags : " + "  ".join([f"#{t['name']}" for t in tags]), meta_style))
+
+    if recipe.get('description'):
+        story.append(Spacer(1, 0.3*cm))
+        story.append(Paragraph(recipe['description'], styles['Normal']))
+
+    story.append(Spacer(1, 0.5*cm))
+
+    # Ingrédients
+    story.append(Paragraph("Ingredients", h2_style))
+
+    base_total     = sum(i['base_quantity'] for i in ingredients)
+    adjusted_total = base_total * scale_factor
+    is_scaled      = abs(scale_factor - 1.0) > 0.001
+
+    header = ["Ingredient", "Base", "Ajuste" if is_scaled else "Quantite", "%"]
+    data   = [header]
+    for ing in ingredients:
+        adjusted = ing['base_quantity'] * scale_factor
+        pct      = ing['base_quantity'] / base_total * 100
+        data.append([ing['name'],
+                     f"{ing['base_quantity']:.1f} g",
+                     f"{adjusted:.1f} g",
+                     f"{pct:.1f}%"])
+    data.append(["TOTAL",
+                 f"{base_total:.0f} g",
+                 f"{adjusted_total:.0f} g",
+                 "100%"])
+
+    table = Table(data, colWidths=[8*cm, 3*cm, 3*cm, 2*cm])
+    table.setStyle(TableStyle([
+        ('BACKGROUND',    (0, 0),  (-1, 0),  orange),
+        ('TEXTCOLOR',     (0, 0),  (-1, 0),  colors.white),
+        ('FONTNAME',      (0, 0),  (-1, 0),  'Helvetica-Bold'),
+        ('BACKGROUND',    (0, -1), (-1, -1), light),
+        ('FONTNAME',      (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('ROWBACKGROUNDS',(0, 1),  (-1, -2), [colors.white, colors.HexColor('#fafafa')]),
+        ('GRID',          (0, 0),  (-1, -1), 0.5, colors.lightgrey),
+        ('ALIGN',         (1, 0),  (-1, -1), 'CENTER'),
+        ('FONTSIZE',      (0, 0),  (-1, -1), 10),
+        ('PADDING',       (0, 0),  (-1, -1), 5),
+    ]))
+    story.append(table)
+
+    # Étapes
+    if steps:
+        story.append(Paragraph("Etapes de preparation", h2_style))
+        for step in steps:
+            story.append(Paragraph(
+                f"<b>Etape {step['step_number']}</b> — {step['description']}",
+                step_style
+            ))
+
+    # Footer
+    story.append(Spacer(1, 1*cm))
+    story.append(Paragraph(f"App Recettes Patissier — mise a jour le {LAST_UPDATE}", meta_style))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
 # ─── Routeur ─────────────────────────────────────────────────────────
 if not st.session_state.logged_in:
     page_login()
@@ -585,3 +707,7 @@ else:
         "edit":       page_form,
         "categories": page_categories,
     }.get(st.session_state.page, page_home)()
+
+# ─── Footer ──────────────────────────────────────────────────────────
+st.divider()
+st.caption(f"🍰 App Recettes Pâtissier — dernière mise à jour : **{LAST_UPDATE}**")
